@@ -1,0 +1,307 @@
+import pandas as pd
+import pyspark.sql.functions as F
+from pyspark.sql.types import *
+from pyspark.sql.window import Window
+from pyspark.sql import SparkSession
+
+MarketCode = 'EG'
+
+df_calls = spark.sql(""" 
+               SELECT id, Account_vod__c, OwnerId, Status_vod__c, IsDeleted, Call_Date_vod__c, Call_Datetime_vod__c, Call_Type_vod__c,MarketCode,nvs_Call_Type__c, Territory_vod__c, gsk_Samples_Offered__c, Is_Sampled_Call_vod__c
+               from epr_stage.fsfa_call
+        where RIGHT(MarketCode, 2) = 'EG'
+        And status_vod__c = 'Submitted_vod'
+        and Call_Date_vod__c >= '2025-01-01 00:00:00.0000000'
+        and IsDeleted = 'False'
+    """).toPandas()
+
+from datetime import timedelta
+df_calls['call_date'] = pd.to_datetime(df_calls['Call_Date_vod__c'])
+df_calls['l30_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=30))
+df_calls['l60_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=60))
+df_calls['l90_days_call'] = df_calls['call_date'] >= (df_calls['call_date'].max() - timedelta(days=70))
+
+
+df_call = df_calls.groupby('Account_vod__c').agg(
+    total_calls = ('id', 'nunique'),
+    calls_l30_days = ('l30_days_call', lambda x: (x == True).sum()),
+    calls_l60_days = ('l60_days_call', lambda x: (x == True).sum()),
+    calls_l90_days = ('l90_days_call', lambda x: (x == True).sum()),
+    calls_with_sample = ('Is_Sampled_Call_vod__c', lambda x: (x == True).count()),
+
+)
+df_call
+
+from pyspark.sql import SparkSession
+df_emails = spark.sql("""
+                        SELECT  
+                        Account_vod__c, Id, Clicked_vod__c, Opened_vod__c, Email_Sent_Date_vod__c, IsDeleted, MarketCode, Status_vod__c
+                        from epr_stage.fsfa_sentemail
+                        where RIGHT(MarketCode, 2) = 'EG'
+                        and Email_Sent_Date_vod__c >= '2025-01-01 00:00:00.0000000'
+                        and IsDeleted = 'False'
+                        and Status_vod__c = 'Delivered_vod'
+                        """).toPandas()
+df_emails
+
+df_emails['Clicked_vod__c'] =  df_emails['Clicked_vod__c'].astype(int)
+df_emails['Opened_vod__c'] =  df_emails['Opened_vod__c'].astype(int)
+
+
+df_email = df_emails.groupby('Account_vod__c').agg(
+    total_emails = ('Id', 'nunique'),
+    clicled_emails = ('Clicked_vod__c', lambda x: (x == 1).sum()),
+    opened_emails = ('Opened_vod__c', lambda x: (x == 1).sum())
+)
+
+df_email['CTR'] = df_email['clicled_emails'] / df_email['opened_emails']
+df_email
+
+from pyspark.sql import SparkSession
+df_msg = spark.sql("""
+                        SELECT Account_vod__c, Id, MarketCode, Clicked_vod__c, Opened_vod__c, Status_vod__c, Transaction_Type_vod__c
+                        from epr_stage.fsfa_sent_message
+                        where RIGHT(MarketCode, 2) = 'EG'
+                        and Capture_Datetime_vod__c >= '2025-01-01 00:00:00.0000000'
+                        --and Status_vod__c = 'Delivered_vod'
+                        """).toPandas()
+df_msg.head()
+df_msg['Clicked_vod__c'] =  df_msg['Clicked_vod__c'].astype(int)
+
+df_msg = df_msg.groupby('Account_vod__c').agg(
+    total_messages = ('Id', 'nunique'),
+    clicked_messages = ('Clicked_vod__c', lambda x: (x == 1).sum())
+)
+df_msg['CTR'] = df_msg['clicked_messages'] / df_msg['total_messages']
+df_msg
+
+import numpy as np
+
+df_final = df_call.merge(df_email, on = 'Account_vod__c', how = 'left')
+df_final = df_final.merge(df_msg, on = 'Account_vod__c', how = 'left')
+df_final['Recommendation'] = np.random.choice(['1','0'], size = len(df_final))
+df_final = df_final.reset_index(drop= False)
+df_final = df_final.fillna(0)
+df_final = df_final.rename(
+    columns={'clicked_messages': 'clicled_messages'}
+)
+
+df_1 = spark.createDataFrame(df_final)
+df_1.write.format('Delta').mode('overwrite').saveAsTable('epr_stage.fsfa_recommendations')
+
+
+# Install scikit-learn in your Databricks cluster
+%pip install scikit-learn
+%pip install xgboost
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+from sklearn import model_selection
+from sklearn import ensemble
+from sklearn import tree
+from sklearn import linear_model
+from sklearn import neighbors
+from sklearn import naive_bayes
+
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+import xgboost as xgb
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import matplotlib as mp
+import seaborn as sns
+
+
+x = df_1.toPandas().drop(['Account_vod__c', 'Recommendation'], axis = 1 )
+y = df_1.toPandas()['Recommendation'].astype(int)
+
+X_train, X_test, Y_train, Y_test = train_test_split(x,y, test_size = 0.2, random_state = 0)
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+models = {
+    "Random Forest" : RandomForestClassifier(),
+    "Gradient Boosting" : GradientBoostingClassifier(),
+    "Logistic Regression" : LogisticRegression(),
+    "XG Boost" : xgb.XGBClassifier(),
+    "SVM" : SVC(),
+}
+
+Result = []
+
+for name, model in models.items():
+    model.fit(X_train, Y_train)
+    Y_pred = model.predict(X_test)
+    acc = accuracy_score(Y_test, Y_pred)
+    cm = confusion_matrix(Y_test, Y_pred)
+    report = classification_report(Y_test, Y_pred, output_dict=True)
+
+    Result.append({
+        "Model": name,
+        "Accuracy": acc,
+        "Confusion Matrix": cm,
+        "Precision (0)": round(report['0']['precision'], 2),
+        "Recall (0)": round(report['0']['recall'], 2),
+        "F1-score (0)": round(report['0']['f1-score'], 2),
+        "Precision (1)": round(report['1']['precision'], 2),
+        "Recall (1)": round(report['1']['recall'], 2),
+        "F1-score (1)": round(report['1']['f1-score'], 2)
+
+        })
+
+results_df = pd.DataFrame(Result)
+results_df
+
+
+# StatQuest with Josh Starmer
+# In Decision tree we create a tree with node and leaf based on gini impourity which decide the root and leaf. 
+# Impurity is leaves with mutiple output, Pure leave has one output either 1 or 0.
+# column with minimum Gini Impurity will be at the top, followed by leaves. 
+# Once we create a decision tree, the new data will flow through that deciosn tree for predictions. 
+
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.model_selection import train_test_split
+import pandas as pd
+
+# Convert Spark DataFrame to Pandas
+df = df_1.toPandas()
+
+# Prepare features and target
+X = df.drop(['Account_vod__c', 'Recommendation'], axis=1)
+y = df['Recommendation'].astype(int)
+
+# Split into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# Standardize features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Define SVM model and parameter grid
+svm = SVC()
+
+
+param_dist = {
+    'C': [0.1, 1, 10, 100],               # Regularization strength
+    'kernel': ['linear', 'rbf', 'poly'],  # Kernel types
+    'gamma': ['scale', 'auto']            # Kernel coefficient
+}
+
+# Perform GridSearchCV
+random_search = RandomizedSearchCV(SVC(), param_distributions=param_dist, n_iter=10, cv=5)
+
+# Fit the model
+random_search.fit(X_train_scaled, y_train)
+
+# Get best model and evaluate
+best_svm = random_search.best_estimator_
+y_pred = best_svm.predict(X_test_scaled)
+
+# Collect performance metrics
+acc = accuracy_score(y_test, y_pred)
+cm = confusion_matrix(y_test, y_pred)
+report = classification_report(y_test, y_pred, output_dict=True)
+
+# Create a summary dictionary
+svm_results = {
+    "Model": "Tuned SVM",
+    "Best Parameters": grid_search.best_params_,
+    "Accuracy": round(acc * 100, 2),
+    "Confusion Matrix": f"[[{cm[0][0]}, {cm[0][1]}], [{cm[1][0]}, {cm[1][1]}]]",
+    "Precision (0)": round(report['0']['precision'], 2),
+    "Recall (0)": round(report['0']['recall'], 2),
+    "F1-score (0)": round(report['0']['f1-score'], 2),
+    "Precision (1)": round(report['1']['precision'], 2),
+    "Recall (1)": round(report['1']['recall'], 2),
+    "F1-score (1)": round(report['1']['f1-score'], 2)
+}
+
+# Convert to DataFrame for display
+results_df = pd.DataFrame([svm_results])
+results_df
+
+# StatQuest with Josh Starmer
+# In Decision tree we create a tree with node and leaf based on gini impourity which decide the root and leaf. 
+# Impurity is leaves with mutiple output, Pure leave has one output either 1 or 0.
+# column with minimum Gini Impurity will be at the top, followed by leaves. 
+# Once we create a decision tree, the new data will flow through that deciosn tree for predictions. 
+
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.model_selection import train_test_split
+import pandas as pd
+
+# Convert Spark DataFrame to Pandas
+df = df_1.toPandas()
+
+# Prepare features and target
+X = df.drop(['Account_vod__c', 'Recommendation'], axis=1)
+y = df['Recommendation'].astype(int)
+
+# Split into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# Standardize features
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Define SVM model and parameter grid
+from sklearn.svm import SVC
+
+svm = SVC(
+    C=0.1,                # Regularization parameter
+    kernel='rbf',         # Kernel type: 'linear', 'poly', 'rbf', 'sigmoid'
+    #degree=3,             # Degree for 'poly' kernel
+    gamma='auto',        # Kernel coefficient: 'scale', 'auto', or float
+    #coef0=0.0,            # Independent term in kernel function (used in 'poly' and 'sigmoid')
+    #shrinking=True,       # Whether to use shrinking heuristic
+    #probability=False,    # Enable probability estimates (slower)
+    #tol=1e-3,             # Tolerance for stopping criterion
+    #cache_size=200,       # Size of kernel cache (in MB)
+    class_weight='balanced'    # Set class weights: None or 'balanced'
+    # verbose=False,        # Enable verbose output
+    # max_iter=-1,          # Limit on iterations (-1 means no limit)
+    # decision_function_shape='ovr',  # 'ovr' or 'ovo'
+    # break_ties=False,     # If True, use tie-breaking in predictions
+    # random_state=None     # Seed for reproducibility
+)
+
+# Fit the model
+svm.fit(X_train_scaled, y_train)
+
+# Get best model and evaluate
+y_pred = svm.predict(X_test_scaled)
+
+# Collect performance metrics
+acc = accuracy_score(y_test, y_pred)
+cm = confusion_matrix(y_test, y_pred, labels = [1, 0])
+report = classification_report(y_test, y_pred, output_dict=True)
+
+# Create a summary dictionary
+svm_results = {
+    "Model": "Tuned SVM",
+    "Accuracy": round(acc * 100, 2),
+    "Confusion Matrix": f"[[{cm[0][0]}, {cm[0][1]}], [{cm[1][0]}, {cm[1][1]}]]",
+    "Precision (0)": round(report['0']['precision'], 2),
+    "Recall (0)": round(report['0']['recall'], 2),
+    "F1-score (0)": round(report['0']['f1-score'], 2),
+    "Precision (1)": round(report['1']['precision'], 2),
+    "Recall (1)": round(report['1']['recall'], 2),
+    "F1-score (1)": round(report['1']['f1-score'], 2)
+}
+
+# Convert to DataFrame for display
+results_df = pd.DataFrame([svm_results])
+results_df
