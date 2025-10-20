@@ -99,7 +99,7 @@ This repository highlights the **analytical process, data engineering flow, and 
 
 **Noor Wali**  
 Expert Data Analyst – Haleon  
-[LinkedIn](https://www.linkedin.com/in/your-link) | [GitHub](https://github.com/noorw8354)
+[LinkedIn](https://www.linkedin.com/in/noor-wali-9ba671175/) | [GitHub](https://github.com/noorw8354)
 
 ---
 
